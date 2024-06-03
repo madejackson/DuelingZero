@@ -153,6 +153,11 @@ class DuelRunner:
         return line.command == ('G', 0) or line.command == ('G', 1)
 
     def run_gcode(self, instance, gcode_line):
+        if args.output:
+            # Append-adds at last
+            file = open(args.output, "a")  # append mode
+            file.write(gcode_line)
+            file.close()
         if instance == self.left:
             print("  left>  ", gcode_line)
         elif instance == self.right:
