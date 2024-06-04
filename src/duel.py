@@ -45,15 +45,15 @@ def center(printer):
     run_gcode(printer, "G0 X60 Y60 F6000")
 
 
-def run_gcode(printer, gcode, verbose=False):
-    """Run a gcode command to completion and return the result.
-    https://github.com/Arksine/moonraker/blob/master/docs/web_api.md#run-a-gcode
-    """
-    r = requests.post("http://" + printer + "/printer/gcode/script?script=" + gcode, timeout=(1, READ_TIMEOUT))
-    if verbose:
-        print(r.status_code)
+def run_gcode(printer, gcode, output=None, verbose=False):
+    if output:
+        r = output.write(gcode+"\n")
+    else:
+        r = requests.post("http://" + printer + "/printer/gcode/script?script=" + gcode, timeout=(1, READ_TIMEOUT))
+        if verbose:
+            print(r.status_code)
     # Disable to workaround 60-second presumably-Moonraker timeout
-    assert(r.status_code == 200)
+        assert(r.status_code == 200)
     return r
 
 
@@ -70,13 +70,16 @@ class DuelRunner:
         self.m400_always = False
         self.args = None
         self.dry_run = False
+        self.verbose = False
         if args is not None:
+            self.output = args.output
             self.left = args.left  # URL of left-side Moonraker instance
             self.right = args.right  # URL of left-side Moonraker instance
             self.move_mode = args.move_mode  # mode in MOVE_MODES
             self.m400_always = args.m400_always
             self.args = args
             self.dry_run = args.dry_run
+            self.verbose = args.verbose
         # Use empty Args for regression testing, until this can be properly refactored.
         # Motion should be separate from execution.
         else:
@@ -121,7 +124,7 @@ class DuelRunner:
             new_y = Y_HIGH
         elif pos.y == Y_HIGH:
             new_y = Y_LOW
-        for gcode in ["G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400"]:
+        for gcode in [";  ! activate T0\nSET_DUAL_CARRIAGE CARRIAGE=0", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400", ";  ! activate T1\nSET_DUAL_CARRIAGE CARRIAGE=1"]:
             self.run_gcode(self.left, gcode)
         return Point(pos.x, new_y)
 
@@ -132,7 +135,7 @@ class DuelRunner:
             new_y = Y_HIGH
         elif pos.y == Y_HIGH:
             new_y = Y_LOW
-        for gcode in ["G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400"]:
+        for gcode in [";  ! activate T1\nSET_DUAL_CARRIAGE CARRIAGE=1", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400", ";  ! activate T0\nSET_DUAL_CARRIAGE CARRIAGE=0"]:
             self.run_gcode(self.right, gcode)
         return Point(pos.x, new_y)
 
@@ -152,13 +155,17 @@ class DuelRunner:
     def is_move_gcode(line):
         return line.command == ('G', 0) or line.command == ('G', 1)
 
+    @staticmethod
+    def is_not_move_or_toolchange(line):
+        return line.command != ('G', 0) and line.command != ('G', 1) and line != T0 and line != T1
+
     def run_gcode(self, instance, gcode_line):
-        if instance == self.left:
+        if instance == self.left and not self.output_file:
             print("  left>  ", gcode_line)
-        elif instance == self.right:
+        elif instance == self.right and not self.output_file:
             print("  right> ", gcode_line)
         if not self.dry_run:
-            run_gcode(instance, gcode_line)
+            run_gcode(instance, gcode_line, self.output_file)
 
     @staticmethod
     def get_corresponding_x(toolhead_pos, next_toolhead_pos, target_y):
@@ -185,29 +192,40 @@ class DuelRunner:
         # TODO: handle extrusion in the move split and retain the g-code used for the move (G0 vs G1, etc.)
         x = self.get_corresponding_x(toolhead_pos, next_toolhead_pos, target_y)
         mid_pos = Point(x, target_y)
-        print("  ! Segmented sequence")
-        print("  ! Doing first part of move sequence")
+        if self.verbose: print("  ! Segmented sequence")
+        if self.output: self.run_gcode(None, ";  ! Segmented sequence")
+        if self.verbose: print("  ! Doing first part of move sequence")
+        if self.output: self.run_gcode(None, ";  ! Doing first part of move sequence")
         self.t0_go_to(mid_pos)
-        print("  ! Backing up t0")
+        if self.verbose: print("  ! Backing up t0")
+        if self.output: self.run_gcode(None, ";  ! Backing up t0")
         self.t0_backaway()
-        print("  ! Shuffling inactive 1")
+        if self.verbose: print("  ! Shuffling inactive t1")
+        if self.output: self.run_gcode(None, ";  ! Shuffling inactive t1")
         right_toolhead_pos = self.t1_shuffle(inactive_toolhead_pos)
-        print(" ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
+        if self.verbose: print(" ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
+        if self.output: self.run_gcode(None, ";  ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
         self.t0_go_to(mid_pos)
-        print(" ! Doing second part of move sequence : %s" % mid_pos)
+        if self.verbose: print(" ! Doing second part of move sequence : %s" % mid_pos)
+        if self.output: self.run_gcode(None, ";  ! Doing second part of move sequence : %s" % mid_pos)
         self.t0_go_to(next_toolhead_pos)
         return right_toolhead_pos
 
     def do_right_backup_sequence(self, toolhead_pos, inactive_toolhead_pos, active_instance, line):
-        print("  ! Backup sequence")
-        print("  ! Backup sequence: t0 Backing up")
+        if self.verbose: print("  ! Backup sequence")
+        if self.output: self.run_gcode(None, ";  ! Backup sequence")
+        if self.verbose: print("  ! Backup sequence: t0 Backing up")
+        if self.output: self.run_gcode(None, ";  ! Backup sequence: t0 Backing up")
         self.t0_backaway()
-        print("  ! Shuffling inactive t1")
+        if self.verbose: print("  ! Shuffling inactive t1")
+        if self.output: self.run_gcode(None, ";  ! Shuffling inactive t1")
         right_toolhead_pos = self.t1_shuffle(inactive_toolhead_pos)
         # Restore original x for active instance
-        print(" ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
+        if self.verbose: print(" ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
+        if self.output: self.run_gcode(None, ";  ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
         self.t0_go_to(toolhead_pos)
-        print(" ! Running original move.")
+        if self.verbose: print(" ! Running original move.")
+        if self.output: self.run_gcode(None, ";  ! Running original move.")
         self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
         return right_toolhead_pos
 
@@ -219,29 +237,40 @@ class DuelRunner:
         # TODO: handle extrusion in the move split and retain the g-code used for the move (G0 vs G1, etc.)
         x = self.get_corresponding_x(toolhead_pos, next_toolhead_pos, target_y)
         mid_pos = Point(x, target_y)
-        print("  ! Segmented sequence")
-        print("  ! Doing first part of move sequence")
+        if self.verbose: print("  ! Segmented sequence")
+        if self.output: self.run_gcode(None, ";  ! Segmented sequence")
+        if self.verbose: print("  ! Doing first part of move sequence")
+        if self.output: self.run_gcode(None, ";  ! Doing first part of move sequence")
         self.t1_go_to(mid_pos)
-        print("  ! Backing up t0")
+        if self.verbose: print("  ! Backing up t1")
+        if self.output: self.run_gcode(None, ";  ! Backing up t1")
         self.t1_backaway()
-        print("  ! Shuffling inactive 1")
+        if self.verbose: print("  ! Shuffling inactive t0")
+        if self.output: self.run_gcode(None, ";  ! Shuffling inactive t0")
         left_toolhead_pos = self.t0_shuffle(inactive_toolhead_pos)
-        print("  ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
+        if self.verbose: print("  ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
+        if self.output: self.run_gcode(None, ";  ! Restoring t0 to mid_pos after backup: %s" % mid_pos)
         self.t1_go_to(mid_pos)
-        print("  ! Doing second part of move sequence : %s" % mid_pos)
+        if self.verbose: print("  ! Doing second part of move sequence : %s" % mid_pos)
+        if self.output: self.run_gcode(None, ";  ! Doing second part of move sequence : %s" % mid_pos)
         self.t1_go_to(next_toolhead_pos)
         return left_toolhead_pos
 
     def do_left_backup_sequence(self, toolhead_pos, inactive_toolhead_pos, active_instance, line):
-        print("  ! Backup sequence")
-        print("  ! Backup shuffle: t0 Backing up")
+        if self.verbose: print("  ! Backup sequence")
+        if self.output: self.run_gcode(None, ";  ! Backup sequence")
+        if self.verbose: print("  ! Backup shuffle: t0 Backing up")
+        if self.output: self.run_gcode(None, ";  ! Backup shuffle: t0 Backing up")
         self.t1_backaway()
-        print("  ! Shuffling inactive t1")
+        if self.verbose: print("  ! Shuffling inactive t0")
+        if self.output: self.run_gcode(None, ";  ! Shuffling inactive t0")
         left_toolhead_pos = self.t0_shuffle(inactive_toolhead_pos)
         # Restore original x for active instance
-        print("  ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
+        if self.verbose: print("  ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
+        if self.output: self.run_gcode(None, ";  ! Resuming after backup: t0 restoring to %s" % toolhead_pos)
         self.t1_go_to(toolhead_pos)
-        print("  ! Running original move.")
+        if self.verbose: print("  ! Running original move.")
+        if self.output: self.run_gcode(None, ";  ! Running original move.")
         self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
         return left_toolhead_pos
 
@@ -259,33 +288,45 @@ class DuelRunner:
             return 'left'
 
     def play_gcodes_file(self, gcode_file):
+
+        if self.output:
+            self.output_file = open(self.output, "a")  # append mode
+
         file_content = None
         with open(gcode_file, 'r') as f:
             file_content = f.read()
         self.play_gcodes(file_content)
 
+        if self.output:
+            self.output_file.close()
+            
+
     def play_gcodes(self, input_file_content):
         """Execute all G-codes from file content, inserting backups/shuffles/splits as needed."""
-        lines = GcodeParser(input_file_content).lines
+        lines = GcodeParser(input_file_content, include_comments=True).lines
 
         active_instance = 'left'
         left_toolhead_pos = LEFT_HOME_POS.copy()
         right_toolhead_pos = RIGHT_HOME_POS.copy()
 
         for line in lines:
-            print(line.gcode_str)
+            if self.verbose: print(line.gcode_str)
             # TODO: ignore Tx when x is already active; save a few M400s and maybe moves that way.
 
-            if self.is_toolchange_gcode(line):
+            if self.is_not_move_or_toolchange(line) and self.output:
+                #forward line unchanged to outputfile if it's not a move or toolchange line
+                self.run_gcode(None, line.gcode_str)
+
+            elif self.is_toolchange_gcode(line):
                 next_instance = None
                 if line == T0:
                     next_instance = 'left'
                 elif line == T1:
                     next_instance = 'right'
-                print("  *   draining moves for %s, then changing to %s (M400)" %
+                if self.verbose: print("  *   draining moves for %s, then changing to %s (M400)" %
                       (active_instance, next_instance))
                 self.run_gcode(self.get_active_printer_name(active_instance), "M400")
-                print("  *   parking currently active toolhead (%s) " % active_instance)
+                if self.verbose: print("  *   parking currently active toolhead (%s) " % active_instance)
                 if line == T0:
                     self.t1_park()
                     right_toolhead_pos = RIGHT_HOME_POS
@@ -332,6 +373,7 @@ class DuelRunner:
 
                 elif self.move_mode == 'smart':
                     # Check if a single move will suffice.
+#                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! test output_file")
                     if overlap_rect or overlap_swept:
                         self.run_gcode(self.get_active_printer_name(active_instance), "M400")
 
@@ -344,8 +386,12 @@ class DuelRunner:
                             # Simple shuffle if we're not in the end zone yet.
                             if toolhead_pos.x < TO_X_BACKAWAY:
                                 self.simple_shuffles += 1
-                                print("  ! Simple shuffle")
-                                print("  ! Shuffling inactive t1")
+                                if self.output:
+                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
+                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t1")
+                                if self.verbose:
+                                    print("  ! Simple shuffle")
+                                    print("  ! Shuffling inactive t1")
                                 right_toolhead_pos = self.t1_shuffle(inactive_toolhead_pos)
                                 self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
 
@@ -372,8 +418,12 @@ class DuelRunner:
                             # Simple shuffle if we're not in the end zone yet.
                             if toolhead_pos.x > X_BACKAWAY_LEN:
                                 self.simple_shuffles += 1
-                                print("  ! Simple shuffle")
-                                print("  ! Shuffling inactive t0")
+                                if self.output:
+                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
+                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t0")
+                                if self.verbose:
+                                    print("  ! Simple shuffle")
+                                    print("  ! Shuffling inactive t0")
                                 left_toolhead_pos = self.t0_shuffle(inactive_toolhead_pos)
                                 self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
 
@@ -420,11 +470,13 @@ class DuelRunner:
         if args.latency_test:
             dr.test_latency()
 
+
         print("Running:")
+
         left = args.left
         right = args.right
 
-        if (args.home or args.input) and not args.dry_run:
+        if (args.home or args.input) and not (args.dry_run or args.output):
             home(left)
             home(right)
 
