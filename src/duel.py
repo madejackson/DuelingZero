@@ -23,6 +23,9 @@ from toolhead import X_BACKAWAY_LEN, BACKAWAY_SPEED, PARK_SPEED, SHUFFLE_SPEED, 
 from point import Point
 from battle import Battle
 
+#T1 Z-Offset
+Z_OFFSET = 0.6
+
 
 # Movement Modes:
 # - simple: if a conflicting move were to occur, exit the program.
@@ -80,6 +83,7 @@ class DuelRunner:
             self.args = args
             self.dry_run = args.dry_run
             self.verbose = args.verbose
+            if args.z_offset: Z_OFFSET = args.z_offset
         # Use empty Args for regression testing, until this can be properly refactored.
         # Motion should be separate from execution.
         else:
@@ -124,7 +128,7 @@ class DuelRunner:
             new_y = Y_HIGH
         elif pos.y == Y_HIGH:
             new_y = Y_LOW
-        for gcode in [";  ! activate T0\nSET_DUAL_CARRIAGE CARRIAGE=0", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400", ";  ! activate T1\nSET_DUAL_CARRIAGE CARRIAGE=1"]:
+        for gcode in ["G91","G0 Z%s"% (Z_OFFSET+0.2),"G90",";  ! activate T0","SET_CARRIAGE CARRIAGE=0", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400","G91","G0 Z%s"% (Z_OFFSET*-1-0.2),"G90",";  ! activate T1","SET_CARRIAGE CARRIAGE=1"]:
             self.run_gcode(self.left, gcode)
         return Point(pos.x, new_y)
 
@@ -135,7 +139,7 @@ class DuelRunner:
             new_y = Y_HIGH
         elif pos.y == Y_HIGH:
             new_y = Y_LOW
-        for gcode in [";  ! activate T1\nSET_DUAL_CARRIAGE CARRIAGE=1", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400", ";  ! activate T0\nSET_DUAL_CARRIAGE CARRIAGE=0"]:
+        for gcode in ["G91","G0 Z%s"% (Z_OFFSET+0.2),"G90",";  ! activate T1","SET_CARRIAGE CARRIAGE=1", "G0 Y%s F%s" % (new_y, SHUFFLE_SPEED), "M400","G91","G0 Z%s"% (Z_OFFSET*-1-0.2),"G90",";  ! activate T0","SET_CARRIAGE CARRIAGE=0"]:
             self.run_gcode(self.right, gcode)
         return Point(pos.x, new_y)
 
@@ -154,10 +158,6 @@ class DuelRunner:
     @staticmethod
     def is_move_gcode(line):
         return line.command == ('G', 0) or line.command == ('G', 1)
-
-    @staticmethod
-    def is_not_move_or_toolchange(line):
-        return line.command != ('G', 0) and line.command != ('G', 1) and line != T0 and line != T1
 
     def run_gcode(self, instance, gcode_line):
         if instance == self.left and not self.output_file:
@@ -178,7 +178,7 @@ class DuelRunner:
         # Compute the new path portion that gets us clear of the future parked inactive extruder in the Y.
         # y = mx + b; slope (m); intercept (b);
         m = (next_toolhead_pos.y - toolhead_pos.y) / (next_toolhead_pos.x - toolhead_pos.x)
-        b = (toolhead_pos.y - m) / toolhead_pos.x
+        b = toolhead_pos.y - toolhead_pos.x * m
         # Find point on line where Y-val = min to clear.
         # x = (<Y val> - b) / m
         x = (target_y - b) / m
@@ -292,172 +292,193 @@ class DuelRunner:
         if self.output:
             self.output_file = open(self.output, "a")  # append mode
 
-        file_content = None
-        with open(gcode_file, 'r') as f:
-            file_content = f.read()
-        self.play_gcodes(file_content)
+        # file_content = None
+        # with open(gcode_file, 'r') as f:
+        #     for line in f:
+        #         self.play_gcodes(line)
+#            file_content = f.read()
+        self.play_gcodes(gcode_file)
 
         if self.output:
             self.output_file.close()
             
 
-    def play_gcodes(self, input_file_content):
+    def play_gcodes(self, gcode_file):
+
         """Execute all G-codes from file content, inserting backups/shuffles/splits as needed."""
-        lines = GcodeParser(input_file_content, include_comments=True).lines
+        with open(gcode_file, 'r') as f:
+            lines = []
+            for line in f:
+                gcode = GcodeParser(line).lines
+                for g in gcode:
+                    gcode = g
+                if not gcode: lines.append(line)
+                else: lines.append(gcode)
 
         active_instance = 'left'
         left_toolhead_pos = LEFT_HOME_POS.copy()
         right_toolhead_pos = RIGHT_HOME_POS.copy()
 
         for line in lines:
-            if self.verbose: print(line.gcode_str)
+
             # TODO: ignore Tx when x is already active; save a few M400s and maybe moves that way.
 
-            if self.is_not_move_or_toolchange(line) and self.output:
-                #forward line unchanged to outputfile if it's not a move or toolchange line
-                self.run_gcode(None, line.gcode_str)
+            #forward line unchanged to outputfile if it's not a gcode line
+            try:    line.gcode_str
+            except:
+                if self.verbose: print(line)
+                self.output_file.write(line)
+            else:
+                
+                if self.verbose: print(line.gcode_str)
 
-            elif self.is_toolchange_gcode(line):
-                next_instance = None
-                if line == T0:
-                    next_instance = 'left'
-                elif line == T1:
-                    next_instance = 'right'
-                if self.verbose: print("  *   draining moves for %s, then changing to %s (M400)" %
-                      (active_instance, next_instance))
-                self.run_gcode(self.get_active_printer_name(active_instance), "M400")
-                if self.verbose: print("  *   parking currently active toolhead (%s) " % active_instance)
-                if line == T0:
-                    self.t1_park()
-                    right_toolhead_pos = RIGHT_HOME_POS
-                    active_instance = 'left'
-                elif line == T1:
-                    self.t0_park()
-                    left_toolhead_pos = LEFT_HOME_POS
-                    active_instance = 'right'
+                #forward line unchanged to outputfile if it's not a move or toolchange gcode line
+                if self.output and not self.is_move_gcode(line):
+                    self.run_gcode(None, line.gcode_str)
 
-            elif self.is_move_gcode(line):
+                elif self.is_toolchange_gcode(line) and not self.output:
+                    next_instance = None
+                    if line == T0:
+                        next_instance = 'left'
+                    elif line == T1:
+                        next_instance = 'right'
+                    if self.verbose: print("  *   draining moves for %s, then changing to %s (M400)" %
+                        (active_instance, next_instance))
+                    if self.output: self.run_gcode(None, ";  *   draining moves for %s, then changing to %s (M400)" %
+                        (active_instance, next_instance))
+                    self.run_gcode(self.get_active_printer_name(active_instance), "M400")
+                    if self.verbose: print("  *   parking currently active toolhead (%s) " % active_instance)
+                    if self.output: self.run_gcode(None, ";  *   parking currently active toolhead (%s) " % active_instance)
+                    if line == T0:
+                        self.t1_park()
+                        right_toolhead_pos = RIGHT_HOME_POS
+                        active_instance = 'left'
+                    elif line == T1:
+                        self.t0_park()
+                        left_toolhead_pos = LEFT_HOME_POS
+                        active_instance = 'right'
 
-                # Form target of move.
-                if active_instance == 'left':
-                    toolhead_pos = left_toolhead_pos
-                elif active_instance == 'right':
-                    toolhead_pos = right_toolhead_pos
+                elif self.is_move_gcode(line):
 
-                next_toolhead_pos = toolhead_pos.copy()
-                if line.get_param('X') is not None:
-                    next_toolhead_pos.x = float(line.get_param('X'))
-                if line.get_param('Y') is not None:
-                    next_toolhead_pos.y = float(line.get_param('Y'))
+                    # Form target of move.
+                    if active_instance == 'left':
+                        toolhead_pos = left_toolhead_pos
+                    elif active_instance == 'right':
+                        toolhead_pos = right_toolhead_pos
 
-                inactive_toolhead_pos = None
-                if active_instance == 'left':
-                    inactive_toolhead_pos = right_toolhead_pos
-                elif active_instance == 'right':
-                    inactive_toolhead_pos = left_toolhead_pos
+                    next_toolhead_pos = toolhead_pos.copy()
+                    if line.get_param('X') is not None:
+                        next_toolhead_pos.x = float(line.get_param('X'))
+                    if line.get_param('Y') is not None:
+                        next_toolhead_pos.y = float(line.get_param('Y'))
 
-                # Ensure move is safe.
-                # (1) Check against destination bounding box.
-                overlap_rect = check_for_overlap(inactive_toolhead_pos, next_toolhead_pos)
-                # (2) Check swept area against inactive bounding box
-                overlap_swept = check_for_overlap_sweep(toolhead_pos, next_toolhead_pos, inactive_toolhead_pos)
+                    inactive_toolhead_pos = None
+                    if active_instance == 'left':
+                        inactive_toolhead_pos = right_toolhead_pos
+                    elif active_instance == 'right':
+                        inactive_toolhead_pos = left_toolhead_pos
 
-                if self.move_mode == 'simple':
-                    if overlap_rect:
-                        print("  ! Bounding boxes overlap: %s %s.  Exiting." % (inactive_toolhead_pos, next_toolhead_pos))
-                        sys.exit(1)
-                    if overlap_swept:
-                        print("  ! Swept bounding boxes overlap: %s --> %s vs %s.  Exiting." %
-                              (toolhead_pos, next_toolhead_pos, next_toolhead_pos))
-                        sys.exit(1)
+                    # Ensure move is safe.
+                    # (1) Check against destination bounding box.
+                    overlap_rect = check_for_overlap(inactive_toolhead_pos, next_toolhead_pos)
+                    # (2) Check swept area against inactive bounding box
+                    overlap_swept = check_for_overlap_sweep(toolhead_pos, next_toolhead_pos, inactive_toolhead_pos)
 
-                elif self.move_mode == 'smart':
-                    # Check if a single move will suffice.
-#                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! test output_file")
-                    if overlap_rect or overlap_swept:
-                        self.run_gcode(self.get_active_printer_name(active_instance), "M400")
+                    if self.move_mode == 'simple':
+                        if overlap_rect:
+                            print("  ! Bounding boxes overlap: %s %s.  Exiting." % (inactive_toolhead_pos, next_toolhead_pos))
+                            sys.exit(1)
+                        if overlap_swept:
+                            print("  ! Swept bounding boxes overlap: %s --> %s vs %s.  Exiting." %
+                                (toolhead_pos, next_toolhead_pos, inactive_toolhead_pos))
+                            sys.exit(1)
 
-                        min_y_to_clear_inactive_toolhead = TOOLHEAD_Y_HEIGHT
-                        max_y_to_clear_inactive_toolhead = Y_HEIGHT - min_y_to_clear_inactive_toolhead
+                    elif self.move_mode == 'smart':
+                        # Check if a single move will suffice.
+                        if overlap_rect or overlap_swept:
+                            self.run_gcode(self.get_active_printer_name(active_instance), "M400")
 
-                        if active_instance == 'left':
-                            # Target must be on the right.
+                            min_y_to_clear_inactive_toolhead = TOOLHEAD_Y_HEIGHT
+                            max_y_to_clear_inactive_toolhead = Y_HEIGHT - min_y_to_clear_inactive_toolhead
 
-                            # Simple shuffle if we're not in the end zone yet.
-                            if toolhead_pos.x < TO_X_BACKAWAY:
-                                self.simple_shuffles += 1
-                                if self.output:
-                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
-                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t1")
-                                if self.verbose:
-                                    print("  ! Simple shuffle")
-                                    print("  ! Shuffling inactive t1")
-                                right_toolhead_pos = self.t1_shuffle(inactive_toolhead_pos)
-                                self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
+                            if active_instance == 'left':
+                                # Target must be on the right.
 
-                            # Segmented move: active is now in the front, and would conflict with a back-to-front shuffled inactive toolhead
-                            elif toolhead_pos.y <= min_y_to_clear_inactive_toolhead:
-                                self.segmented_shuffles += 1
-                                right_toolhead_pos = self.do_right_segmented_sequence(toolhead_pos, min_y_to_clear_inactive_toolhead,
-                                                                                      next_toolhead_pos, inactive_toolhead_pos)
+                                # Simple shuffle if we're not in the end zone yet.
+                                if toolhead_pos.x < TO_X_BACKAWAY:
+                                    self.simple_shuffles += 1
+                                    if self.output:
+                                        self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
+                                        self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t1")
+                                    if self.verbose:
+                                        print("  ! Simple shuffle")
+                                        print("  ! Shuffling inactive t1")
+                                    right_toolhead_pos = self.t1_shuffle(inactive_toolhead_pos)
+                                    self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
 
-                            # Segmented move: active is in the rear
-                            elif toolhead_pos.y >= max_y_to_clear_inactive_toolhead:
-                                self.segmented_shuffles += 1
-                                right_toolhead_pos = self.do_right_segmented_sequence(toolhead_pos, max_y_to_clear_inactive_toolhead,
-                                                                                      next_toolhead_pos, inactive_toolhead_pos)
+                                # Segmented move: active is now in the front, and would conflict with a back-to-front shuffled inactive toolhead
+                                elif toolhead_pos.y <= min_y_to_clear_inactive_toolhead:
+                                    self.segmented_shuffles += 1
+                                    right_toolhead_pos = self.do_right_segmented_sequence(toolhead_pos, min_y_to_clear_inactive_toolhead,
+                                                                                        next_toolhead_pos, inactive_toolhead_pos)
 
-                            # Backup move.
-                            else:
-                                self.backup_shuffles += 1
-                                right_toolhead_pos = self.do_right_backup_sequence(toolhead_pos, inactive_toolhead_pos, active_instance, line)
+                                # Segmented move: active is in the rear
+                                elif toolhead_pos.y >= max_y_to_clear_inactive_toolhead:
+                                    self.segmented_shuffles += 1
+                                    right_toolhead_pos = self.do_right_segmented_sequence(toolhead_pos, max_y_to_clear_inactive_toolhead,
+                                                                                        next_toolhead_pos, inactive_toolhead_pos)
 
-                        elif active_instance == 'right':
-                            # Target must be on the left.
+                                # Backup move.
+                                else:
+                                    self.backup_shuffles += 1
+                                    right_toolhead_pos = self.do_right_backup_sequence(toolhead_pos, inactive_toolhead_pos, active_instance, line)
 
-                            # Simple shuffle if we're not in the end zone yet.
-                            if toolhead_pos.x > X_BACKAWAY_LEN:
-                                self.simple_shuffles += 1
-                                if self.output:
-                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
-                                    self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t0")
-                                if self.verbose:
-                                    print("  ! Simple shuffle")
-                                    print("  ! Shuffling inactive t0")
-                                left_toolhead_pos = self.t0_shuffle(inactive_toolhead_pos)
-                                self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
+                            elif active_instance == 'right':
+                                # Target must be on the left.
 
-                            # Segmented move: active is in the front
-                            elif toolhead_pos.y <= min_y_to_clear_inactive_toolhead:
-                                self.segmented_shuffles += 1
-                                left_toolhead_pos = self.do_left_segmented_sequence(toolhead_pos, min_y_to_clear_inactive_toolhead,
-                                                                                      next_toolhead_pos, inactive_toolhead_pos)
+                                # Simple shuffle if we're not in the end zone yet.
+                                if toolhead_pos.x > X_BACKAWAY_LEN:
+                                    self.simple_shuffles += 1
+                                    if self.output:
+                                        self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Simple shuffle")
+                                        self.run_gcode(self.get_active_printer_name(active_instance), ";  ! Shuffling inactive t0")
+                                    if self.verbose:
+                                        print("  ! Simple shuffle")
+                                        print("  ! Shuffling inactive t0")
+                                    left_toolhead_pos = self.t0_shuffle(inactive_toolhead_pos)
+                                    self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
 
-                            # Segmented move: active is in the rear
-                            elif toolhead_pos.y >= max_y_to_clear_inactive_toolhead:
-                                self.segmented_shuffles += 1
-                                left_toolhead_pos = self.do_left_segmented_sequence(toolhead_pos, max_y_to_clear_inactive_toolhead,
-                                                                                      next_toolhead_pos, inactive_toolhead_pos)
+                                # Segmented move: active is in the front
+                                elif toolhead_pos.y <= min_y_to_clear_inactive_toolhead:
+                                    self.segmented_shuffles += 1
+                                    left_toolhead_pos = self.do_left_segmented_sequence(toolhead_pos, min_y_to_clear_inactive_toolhead,
+                                                                                        next_toolhead_pos, inactive_toolhead_pos)
 
-                            # Backup move.
-                            else:
-                                self.backup_shuffles += 1
-                                right_toolhead_pos = self.do_left_backup_sequence(toolhead_pos, inactive_toolhead_pos, active_instance, line)
+                                # Segmented move: active is in the rear
+                                elif toolhead_pos.y >= max_y_to_clear_inactive_toolhead:
+                                    self.segmented_shuffles += 1
+                                    left_toolhead_pos = self.do_left_segmented_sequence(toolhead_pos, max_y_to_clear_inactive_toolhead,
+                                                                                        next_toolhead_pos, inactive_toolhead_pos)
 
-                    # If no overlap, just do the straight line.
-                    else:
-                        self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
+                                # Backup move.
+                                else:
+                                    self.backup_shuffles += 1
+                                    right_toolhead_pos = self.do_left_backup_sequence(toolhead_pos, inactive_toolhead_pos, active_instance, line)
 
-                # Should not be necessary... workaround to test, despite M400 insertion bugs.
-                if self.m400_always:
-                    for instance in [self.left, self.right]:
-                        self.run_gcode(self.left, "M400")
+                        # If no overlap, just do the straight line.
+                        else:
+                            self.run_gcode(self.get_active_printer_name(active_instance), line.gcode_str)
 
-                # Update position of toolhead after execution
-                if active_instance == 'left':
-                    left_toolhead_pos = next_toolhead_pos
-                elif active_instance == 'right':
-                    right_toolhead_pos = next_toolhead_pos
+                    # Should not be necessary... workaround to test, despite M400 insertion bugs.
+                    if self.m400_always:
+                        for instance in [self.left, self.right]:
+                            self.run_gcode(self.left, "M400")
+
+                    # Update position of toolhead after execution
+                    if active_instance == 'left':
+                        left_toolhead_pos = next_toolhead_pos
+                    elif active_instance == 'right':
+                        right_toolhead_pos = next_toolhead_pos
 
         for instance in [self.left, self.right]:
             self.run_gcode(instance, "M400")
@@ -514,6 +535,7 @@ if __name__ == "__main__":
     parser.add_argument('--move_mode', help="Interference mode: simple fails, smart splits moves", default=DEF_MOVE_MODE)
     parser.add_argument('--latency-test', help="Measure latency of command exec", action='store_true')
     parser.add_argument('--verbose', help="Use more-verbose debug output", action='store_true')
+    parser.add_argument('--z_offset', help="set T1 Z-Offset", action='store_true')
 
     args = parser.parse_args()
 
